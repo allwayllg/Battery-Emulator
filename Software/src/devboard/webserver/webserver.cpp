@@ -1,9 +1,11 @@
 #include "webserver.h"
 #include <Preferences.h>
 #include <ctime>
+#include "../../../USER_SECRETS.h"
 #include "../../datalayer/datalayer.h"
 #include "../../datalayer/datalayer_extended.h"
 #include "../../lib/bblanchon-ArduinoJson/ArduinoJson.h"
+#include "../sdcard/sdcard.h"
 #include "../utils/events.h"
 #include "../utils/led_handler.h"
 #include "../utils/timer.h"
@@ -17,8 +19,9 @@ unsigned long ota_progress_millis = 0;
 #include "advanced_battery_html.h"
 #include "can_logging_html.h"
 #include "cellmonitor_html.h"
+#include "debug_logging_html.h"
 #include "events_html.h"
-#include "index_html.cpp"
+#include "index_html.h"
 #include "settings_html.h"
 
 MyTimer ota_timeout_timer = MyTimer(15000);
@@ -27,8 +30,6 @@ bool ota_active = false;
 const char get_firmware_info_html[] = R"rawliteral(%X%)rawliteral";
 
 void init_webserver() {
-
-  String content = index_html;
 
   server.on("/logout", HTTP_GET, [](AsyncWebServerRequest* request) { request->send(401); });
 
@@ -60,17 +61,27 @@ void init_webserver() {
 
   // Route for going to CAN logging web page
   server.on("/canlog", HTTP_GET, [](AsyncWebServerRequest* request) {
-    request->send_P(200, "text/html", index_html, can_logger_processor);
+    AsyncWebServerResponse* response = request->beginResponse(200, "text/html", can_logger_processor());
+    request->send(response);
   });
 
-  // Define the handler to stop logging
-  server.on("/stop_logging", HTTP_GET, [](AsyncWebServerRequest* request) {
+#if defined(DEBUG_VIA_WEB) || defined(LOG_TO_SD)
+  // Route for going to debug logging web page
+  server.on("/log", HTTP_GET, [](AsyncWebServerRequest* request) {
+    AsyncWebServerResponse* response = request->beginResponse(200, "text/html", debug_logger_processor());
+    request->send(response);
+  });
+#endif  // DEBUG_VIA_WEB
+
+  // Define the handler to stop can logging
+  server.on("/stop_can_logging", HTTP_GET, [](AsyncWebServerRequest* request) {
     datalayer.system.info.can_logging_active = false;
     request->send_P(200, "text/plain", "Logging stopped");
   });
 
-  // Define the handler to export logs
-  server.on("/export_logs", HTTP_GET, [](AsyncWebServerRequest* request) {
+#ifndef LOG_CAN_TO_SD
+  // Define the handler to export can log
+  server.on("/export_can_log", HTTP_GET, [](AsyncWebServerRequest* request) {
     String logs = String(datalayer.system.info.logged_can_messages);
     if (logs.length() == 0) {
       logs = "No logs available.";
@@ -95,6 +106,66 @@ void init_webserver() {
     response->addHeader("Content-Disposition", String("attachment; filename=\"") + String(filename) + "\"");
     request->send(response);
   });
+#endif
+
+#ifdef LOG_CAN_TO_SD
+  // Define the handler to export can log
+  server.on("/export_can_log", HTTP_GET, [](AsyncWebServerRequest* request) {
+    pause_can_writing();
+    request->send(SD, CAN_LOG_FILE, String(), true);
+    resume_can_writing();
+  });
+
+  // Define the handler to delete can log
+  server.on("/delete_can_log", HTTP_GET, [](AsyncWebServerRequest* request) {
+    delete_can_log();
+    request->send_P(200, "text/plain", "Log file deleted");
+  });
+#endif
+
+#ifdef LOG_TO_SD
+  // Define the handler to delete log file
+  server.on("/delete_log", HTTP_GET, [](AsyncWebServerRequest* request) {
+    delete_log();
+    request->send_P(200, "text/plain", "Log file deleted");
+  });
+
+  // Define the handler to export debug log
+  server.on("/export_log", HTTP_GET, [](AsyncWebServerRequest* request) {
+    pause_log_writing();
+    request->send(SD, LOG_FILE, String(), true);
+    resume_log_writing();
+  });
+#endif
+
+#ifndef LOG_TO_SD
+  // Define the handler to export debug log
+  server.on("/export_log", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String logs = String(datalayer.system.info.logged_can_messages);
+    if (logs.length() == 0) {
+      logs = "No logs available.";
+    }
+
+    // Get the current time
+    time_t now = time(nullptr);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+
+    // Ensure time retrieval was successful
+    char filename[32];
+    if (strftime(filename, sizeof(filename), "log_%H-%M-%S.txt", &timeinfo)) {
+      // Valid filename created
+    } else {
+      // Fallback filename if automatic timestamping failed
+      strcpy(filename, "battery_emulator_log.txt");
+    }
+
+    // Use request->send with dynamic headers
+    AsyncWebServerResponse* response = request->beginResponse(200, "text/plain", logs);
+    response->addHeader("Content-Disposition", String("attachment; filename=\"") + String(filename) + "\"");
+    request->send(response);
+  });
+#endif
 
   // Route for going to cellmonitor web page
   server.on("/cellmonitor", HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -323,6 +394,33 @@ void init_webserver() {
     request->send(200, "text/plain", "Updated successfully");
   });
 
+  // Route for erasing DTC on Volvo/Polestar batteries
+  server.on("/volvoEraseDTC", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password)) {
+      return request->requestAuthentication();
+    }
+    datalayer_extended.VolvoPolestar.UserRequestDTCreset = true;
+    request->send(200, "text/plain", "Updated successfully");
+  });
+
+  // Route for reading DTC on Volvo/Polestar batteries
+  server.on("/volvoReadDTC", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password)) {
+      return request->requestAuthentication();
+    }
+    datalayer_extended.VolvoPolestar.UserRequestDTCreadout = true;
+    request->send(200, "text/plain", "Updated successfully");
+  });
+
+  // Route for performing ECU reset on Volvo/Polestar batteries
+  server.on("/volvoBECMecuReset", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password)) {
+      return request->requestAuthentication();
+    }
+    datalayer_extended.VolvoPolestar.UserRequestBECMecuReset = true;
+    request->send(200, "text/plain", "Updated successfully");
+  });
+
 #ifdef TEST_FAKE_BATTERY
   // Route for editing FakeBatteryVoltage
   server.on("/updateFakeBatteryVoltage", HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -509,7 +607,10 @@ String get_firmware_info_processor(const String& var) {
 #endif  // HW_STARK
 #ifdef HW_3LB
     doc["hardware"] = "3LB board";
-#endif  // HW_STARK
+#endif  // HW_3LB
+#ifdef HW_DEVKIT
+    doc["hardware"] = "ESP32 DevKit V1";
+#endif  // HW_DEVKIT
 
     doc["firmware"] = String(version_number);
     serializeJson(doc, content);
@@ -535,14 +636,15 @@ String processor(const String& var) {
     content += "<div style='background-color: #303E47; padding: 10px; margin-bottom: 10px;border-radius: 50px'>";
 
     // Show version number
-    content += "<h4>Software: " + String(version_number) + "</h4>";
+    content += "<h4>Software: " + String(version_number);
 // Show hardware used:
 #ifdef HW_LILYGO
-    content += "<h4>Hardware: LilyGo T-CAN485</h4>";
+    content += " Hardware: LilyGo T-CAN485";
 #endif  // HW_LILYGO
 #ifdef HW_STARK
-    content += "<h4>Hardware: Stark CMR Module</h4>";
+    content += " Hardware: Stark CMR Module";
 #endif  // HW_STARK
+    content += "</h4>";
     content += "<h4>Uptime: " + uptime_formatter::getUptime() + "</h4>";
 #ifdef FUNCTION_TIME_MEASUREMENT
     // Load information
@@ -566,11 +668,14 @@ String processor(const String& var) {
 
     wl_status_t status = WiFi.status();
     // Display ssid of network connected to and, if connected to the WiFi, its own IP
-    content += "<h4>SSID: " + String(ssid.c_str()) + "</h4>";
+    content += "<h4>SSID: " + String(ssid.c_str());
+    if (status == WL_CONNECTED) {
+      // Get and display the signal strength (RSSI) and channel
+      content += " RSSI:" + String(WiFi.RSSI()) + " dBm Ch: " + String(WiFi.channel());
+    }
+    content += "</h4>";
     if (status == WL_CONNECTED) {
       content += "<h4>IP: " + WiFi.localIP().toString() + "</h4>";
-      // Get and display the signal strength (RSSI) and channel
-      content += "<h4>Signal strength: " + String(WiFi.RSSI()) + " dBm, at channel " + String(WiFi.channel()) + "</h4>";
     } else {
       content += "<h4>Wifi state: " + getConnectResultString(status) + "</h4>";
     }
@@ -593,6 +698,12 @@ String processor(const String& var) {
       content += " (LFP)";
     }
     content += "</h4>";
+
+#ifdef CAN_SHUNT_SELECTED
+    content += "<h4 style='color: white;'>Shunt protocol: ";
+    content += datalayer.system.info.shunt_protocol;
+    content += "</h4>";
+#endif
 
 #if defined CHEVYVOLT_CHARGER || defined NISSANLEAF_CHARGER
     content += "<h4 style='color: white;'>Charger protocol: ";
@@ -692,13 +803,30 @@ String processor(const String& var) {
     }
     content += "<h4>Temperature max: " + String(tempMaxFloat, 1) + " C</h4>";
     content += "<h4>Temperature min: " + String(tempMinFloat, 1) + " C</h4>";
-    if (datalayer.battery.status.bms_status == ACTIVE) {
-      content += "<h4>System status: OK </h4>";
-    } else if (datalayer.battery.status.bms_status == UPDATING) {
-      content += "<h4>System status: UPDATING </h4>";
-    } else {
-      content += "<h4>System status: FAULT </h4>";
+
+    content += "<h4>System status: ";
+    switch (datalayer.battery.status.bms_status) {
+      case ACTIVE:
+        content += String("OK");
+        break;
+      case UPDATING:
+        content += String("UPDATING");
+        break;
+      case FAULT:
+        content += String("FAULT");
+        break;
+      case INACTIVE:
+        content += String("INACTIVE");
+        break;
+      case STANDBY:
+        content += String("STANDBY");
+        break;
+      default:
+        content += String("??");
+        break;
     }
+    content += "</h4>";
+
     if (datalayer.battery.status.current_dA == 0) {
       content += "<h4>Battery idle</h4>";
     } else if (datalayer.battery.status.current_dA < 0) {
@@ -977,6 +1105,9 @@ String processor(const String& var) {
     content += "<button onclick='Settings()'>Change Settings</button> ";
     content += "<button onclick='Advanced()'>More Battery Info</button> ";
     content += "<button onclick='CANlog()'>CAN logger</button> ";
+#if defined(DEBUG_VIA_WEB) || defined(LOG_TO_SD)
+    content += "<button onclick='Log()'>Log</button> ";
+#endif  // DEBUG_VIA_WEB
     content += "<button onclick='Cellmon()'>Cellmonitor</button> ";
     content += "<button onclick='Events()'>Events</button> ";
     content += "<button onclick='askReboot()'>Reboot Emulator</button>";
@@ -1002,6 +1133,7 @@ String processor(const String& var) {
     content += "function Settings() { window.location.href = '/settings'; }";
     content += "function Advanced() { window.location.href = '/advanced'; }";
     content += "function CANlog() { window.location.href = '/canlog'; }";
+    content += "function Log() { window.location.href = '/log'; }";
     content += "function Events() { window.location.href = '/events'; }";
     content +=
         "function askReboot() { if (window.confirm('Are you sure you want to reboot the emulator? NOTE: If "
@@ -1062,9 +1194,9 @@ void onOTAProgress(size_t current, size_t final) {
   // Log every 1 second
   if (millis() - ota_progress_millis > 1000) {
     ota_progress_millis = millis();
-#ifdef DEBUG_VIA_USB
-    Serial.printf("OTA Progress Current: %u bytes, Final: %u bytes\n", current, final);
-#endif  // DEBUG_VIA_USB
+#ifdef DEBUG_LOG
+    logging.printf("OTA Progress Current: %u bytes, Final: %u bytes\n", current, final);
+#endif  // DEBUG_LOG
     // Reset the "watchdog"
     ota_timeout_timer.reset();
   }
@@ -1081,13 +1213,13 @@ void onOTAEnd(bool success) {
     // Max Charge/Discharge = 0; CAN = stop; contactors = open
     setBatteryPause(true, true, true, false);
     // a reboot will be done by the OTA library. no need to do anything here
-#ifdef DEBUG_VIA_USB
-    Serial.println("OTA update finished successfully!");
-#endif  // DEBUG_VIA_USB
+#ifdef DEBUG_LOG
+    logging.println("OTA update finished successfully!");
+#endif  // DEBUG_LOG
   } else {
-#ifdef DEBUG_VIA_USB
-    Serial.println("There was an error during OTA update!");
-#endif  // DEBUG_VIA_USB
+#ifdef DEBUG_LOG
+    logging.println("There was an error during OTA update!");
+#endif  // DEBUG_LOG
     //try to Resume the battery pause and CAN communication
     setBatteryPause(false, false);
   }

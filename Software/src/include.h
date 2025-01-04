@@ -9,6 +9,7 @@
 
 #include "devboard/hal/hal.h"
 #include "devboard/safety/safety.h"
+#include "devboard/utils/logging.h"
 #include "devboard/utils/time_meas.h"
 #include "devboard/utils/types.h"
 
@@ -19,12 +20,7 @@
 /* - ERROR CHECKS BELOW, DON'T TOUCH - */
 
 #if !defined(HW_CONFIGURED)
-#error You must select a HW to run on!
-#endif
-
-#if defined(CAN_ADDON) && defined(CANFD_ADDON)
-// Check that user did not try to use dual can and fd-can on same hardware pins
-#error CAN_ADDON AND CANFD_ADDON CANNOT BE USED SIMULTANEOUSLY
+#error You must select a target hardware in the USER_SERTTINGS.h file!
 #endif
 
 #ifdef USE_CANFD_INTERFACE_AS_CLASSIC_CAN
@@ -48,8 +44,23 @@
 #endif
 #endif
 
+#ifdef HW_LILYGO
+#ifdef PERIODIC_BMS_RESET
+#if defined(CAN_ADDON) || defined(CANFD_ADDON) || defined(CHADEMO_BATTERY)
+//Check that BMS reset is not used at the same time as Chademo and CAN addons
+#error BMS RESET CANNOT BE USED AT SAME TIME AS CAN-ADDONS / CHADMEO! NOT ENOUGH GPIO!
+#endif
+#endif
+#endif
+
 #ifndef BATTERY_SELECTED
 #error No battery selected! Choose one from the USER_SETTINGS.h file
+#endif
+
+#if defined(LOG_CAN_TO_SD) || defined(LOG_TO_SD)
+#if !defined(HW_LILYGO)
+#error The SD card logging feature is only available on LilyGo hardware
+#endif
 #endif
 
 #endif
