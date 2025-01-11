@@ -183,6 +183,15 @@ CAN_frame BMW_6F4_CELL_CONTINUE = {.FD = false,
                                    .ID = 0x6F4,
                                    .data = {0x07, 0x04, 0x31, 0x03, 0xAD, 0x6E}};
 
+CAN_frame BMW_BUS_WAKEUP_REQUEST = {
+    .FD = false,
+    .ext_ID = false,
+    .DLC = 4,
+    .ID = 0x554,
+    .data = {
+        0x5A, 0xA5, 0x5A,
+        0xA5}};  // Won't work at 500kbps! Ideally sent at 50kbps - but can also achieve wakeup at 100kbps (helps with library support but might not be as reliable).
+
 //The above CAN messages need to be sent towards the battery to keep it alive
 
 static uint8_t startup_counter_contactor = 0;
@@ -357,6 +366,24 @@ static uint8_t increment_alive_counter(uint8_t counter) {
     counter = 0;
   }
   return counter;
+}
+
+void wake_battery_via_canbus() {
+  //TJA1055 transceiver remote wake requires pulses on the bus of
+  // Dominant for at least ~7 µs (min) and at most ~38 µs (max)
+  // Followed by a Recessive interval of at least ~3 µs (min) and at most ~10 µs (max)
+  // Then a second dominant pulse of similar timing.
+
+  CAN_cfg.speed = CAN_SPEED_100KBPS;  //Slow down canbus to achieve wakeup timings
+  ESP32Can.CANInit();                 // ReInit native CAN module at new speed
+  transmit_can_frame(&BMW_BUS_WAKEUP_REQUEST, can_config.battery);
+  transmit_can_frame(&BMW_BUS_WAKEUP_REQUEST, can_config.battery);
+  CAN_cfg.speed = CAN_SPEED_500KBPS;  //Resume fullspeed
+  ESP32Can.CANInit();                 // ReInit native CAN module at new speed
+
+#ifdef DEBUG_LOG
+  logging.println("Sent magic wakeup packet to SME at 100kbps...");
+#endif
 }
 
 void update_values_battery2() {  //This function maps all the values fetched via CAN2 to the battery2 datalayer
@@ -1145,12 +1172,15 @@ void setup_battery(void) {  // Performs one time setup at startup
   datalayer.battery2.status.voltage_dV =
       0;  //Init voltage to 0 to allow contactor check to operate without fear of default values colliding
 #endif
+
   pinMode(WUP_PIN1, OUTPUT);
   digitalWrite(WUP_PIN1, HIGH);  // Wake up the battery
 #if defined(DOUBLE_BATTERY) && defined(WUP_PIN2)
   pinMode(WUP_PIN2, OUTPUT);
   digitalWrite(WUP_PIN2, HIGH);  // Wake up the battery
 #endif                           // defined(WUP_PIN2) &&  defined (DOUBLE_BATTERY)
+
+  wake_battery_via_canbus();  //Wakeup the SME
 }
 
 #endif
