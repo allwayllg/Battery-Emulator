@@ -37,26 +37,26 @@ void init_webserver() {
   server.on("/GetFirmwareInfo", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password))
       return request->requestAuthentication();
-    request->send_P(200, "application/json", get_firmware_info_html, get_firmware_info_processor);
+    request->send(200, "application/json", get_firmware_info_html, get_firmware_info_processor);
   });
 
   // Route for root / web page
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password))
       return request->requestAuthentication();
-    request->send_P(200, "text/html", index_html, processor);
+    request->send(200, "text/html", index_html, processor);
   });
 
   // Route for going to settings web page
   server.on("/settings", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password))
       return request->requestAuthentication();
-    request->send_P(200, "text/html", index_html, settings_processor);
+    request->send(200, "text/html", index_html, settings_processor);
   });
 
   // Route for going to advanced battery info web page
   server.on("/advanced", HTTP_GET, [](AsyncWebServerRequest* request) {
-    request->send_P(200, "text/html", index_html, advanced_battery_processor);
+    request->send(200, "text/html", index_html, advanced_battery_processor);
   });
 
   // Route for going to CAN logging web page
@@ -76,7 +76,7 @@ void init_webserver() {
   // Define the handler to stop can logging
   server.on("/stop_can_logging", HTTP_GET, [](AsyncWebServerRequest* request) {
     datalayer.system.info.can_logging_active = false;
-    request->send_P(200, "text/plain", "Logging stopped");
+    request->send(200, "text/plain", "Logging stopped");
   });
 
 #ifndef LOG_CAN_TO_SD
@@ -112,14 +112,14 @@ void init_webserver() {
   // Define the handler to export can log
   server.on("/export_can_log", HTTP_GET, [](AsyncWebServerRequest* request) {
     pause_can_writing();
-    request->send(SD, CAN_LOG_FILE, String(), true);
+    request->send(SD_MMC, CAN_LOG_FILE, String(), true);
     resume_can_writing();
   });
 
   // Define the handler to delete can log
   server.on("/delete_can_log", HTTP_GET, [](AsyncWebServerRequest* request) {
     delete_can_log();
-    request->send_P(200, "text/plain", "Log file deleted");
+    request->send(200, "text/plain", "Log file deleted");
   });
 #endif
 
@@ -127,13 +127,13 @@ void init_webserver() {
   // Define the handler to delete log file
   server.on("/delete_log", HTTP_GET, [](AsyncWebServerRequest* request) {
     delete_log();
-    request->send_P(200, "text/plain", "Log file deleted");
+    request->send(200, "text/plain", "Log file deleted");
   });
 
   // Define the handler to export debug log
   server.on("/export_log", HTTP_GET, [](AsyncWebServerRequest* request) {
     pause_log_writing();
-    request->send(SD, LOG_FILE, String(), true);
+    request->send(SD_MMC, LOG_FILE, String(), true);
     resume_log_writing();
   });
 #endif
@@ -171,14 +171,14 @@ void init_webserver() {
   server.on("/cellmonitor", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password))
       return request->requestAuthentication();
-    request->send_P(200, "text/html", index_html, cellmonitor_processor);
+    request->send(200, "text/html", index_html, cellmonitor_processor);
   });
 
   // Route for going to event log web page
   server.on("/events", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password))
       return request->requestAuthentication();
-    request->send_P(200, "text/html", index_html, events_processor);
+    request->send(200, "text/html", index_html, events_processor);
   });
 
   // Route for clearing all events
@@ -385,6 +385,15 @@ void init_webserver() {
     }
   });
 
+  // Route for clearing isolation faults on Tesla
+  server.on("/clearIsolation", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password)) {
+      return request->requestAuthentication();
+    }
+    datalayer.battery.settings.user_requests_isolation_clear = true;
+    request->send(200, "text/plain", "Updated successfully");
+  });
+
   // Route for resetting SOH on Nissan LEAF batteries
   server.on("/resetSOH", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password)) {
@@ -439,6 +448,93 @@ void init_webserver() {
   });
 #endif  // TEST_FAKE_BATTERY
 
+#ifdef TESLA_MODEL_3Y_BATTERY
+
+  // Route for editing balancing enabled
+  server.on("/TeslaBalAct", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password))
+      return request->requestAuthentication();
+    if (request->hasParam("value")) {
+      String value = request->getParam("value")->value();
+      datalayer.battery.settings.user_requests_balancing = value.toInt();
+      store_settings();
+      request->send(200, "text/plain", "Updated successfully");
+    } else {
+      request->send(400, "text/plain", "Bad Request");
+    }
+  });
+
+  // Route for editing balancing max time
+  server.on("/BalTime", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password))
+      return request->requestAuthentication();
+    if (request->hasParam("value")) {
+      String value = request->getParam("value")->value();
+      datalayer.battery.settings.balancing_time_ms = static_cast<uint32_t>(value.toFloat() * 60000);
+      store_settings();
+      request->send(200, "text/plain", "Updated successfully");
+    } else {
+      request->send(400, "text/plain", "Bad Request");
+    }
+  });
+
+  // Route for editing balancing max power
+  server.on("/BalFloatPower", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password))
+      return request->requestAuthentication();
+    if (request->hasParam("value")) {
+      String value = request->getParam("value")->value();
+      datalayer.battery.settings.balancing_float_power_W = static_cast<uint16_t>(value.toFloat());
+      store_settings();
+      request->send(200, "text/plain", "Updated successfully");
+    } else {
+      request->send(400, "text/plain", "Bad Request");
+    }
+  });
+
+  // Route for editing balancing max pack voltage
+  server.on("/BalMaxPackV", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password))
+      return request->requestAuthentication();
+    if (request->hasParam("value")) {
+      String value = request->getParam("value")->value();
+      datalayer.battery.settings.balancing_max_pack_voltage_dV = static_cast<uint16_t>(value.toFloat() * 10);
+      store_settings();
+      request->send(200, "text/plain", "Updated successfully");
+    } else {
+      request->send(400, "text/plain", "Bad Request");
+    }
+  });
+
+  // Route for editing balancing max cell voltage
+  server.on("/BalMaxCellV", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password))
+      return request->requestAuthentication();
+    if (request->hasParam("value")) {
+      String value = request->getParam("value")->value();
+      datalayer.battery.settings.balancing_max_cell_voltage_mV = static_cast<uint16_t>(value.toFloat());
+      store_settings();
+      request->send(200, "text/plain", "Updated successfully");
+    } else {
+      request->send(400, "text/plain", "Bad Request");
+    }
+  });
+
+  // Route for editing balancing max cell voltage deviation
+  server.on("/BalMaxDevCellV", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (WEBSERVER_AUTH_REQUIRED && !request->authenticate(http_username, http_password))
+      return request->requestAuthentication();
+    if (request->hasParam("value")) {
+      String value = request->getParam("value")->value();
+      datalayer.battery.settings.balancing_max_deviation_cell_voltage_mV = static_cast<uint16_t>(value.toFloat());
+      store_settings();
+      request->send(200, "text/plain", "Updated successfully");
+    } else {
+      request->send(400, "text/plain", "Bad Request");
+    }
+  });
+#endif
+
 #if defined CHEVYVOLT_CHARGER || defined NISSANLEAF_CHARGER
   // Route for editing ChargerTargetV
   server.on("/updateChargeSetpointV", HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -455,11 +551,11 @@ void init_webserver() {
       request->send(400, "text/plain", "Bad Request");
     }
 
-    if (!(val * charger_setpoint_HV_IDC <= CHARGER_MAX_POWER)) {
+    if (!(val * datalayer.charger.charger_setpoint_HV_IDC <= CHARGER_MAX_POWER)) {
       request->send(400, "text/plain", "Bad Request");
     }
 
-    charger_setpoint_HV_VDC = val;
+    datalayer.charger.charger_setpoint_HV_VDC = val;
 
     request->send(200, "text/plain", "Updated successfully");
   });
@@ -479,11 +575,11 @@ void init_webserver() {
       request->send(400, "text/plain", "Bad Request");
     }
 
-    if (!(val * charger_setpoint_HV_VDC <= CHARGER_MAX_POWER)) {
+    if (!(val * datalayer.charger.charger_setpoint_HV_VDC <= CHARGER_MAX_POWER)) {
       request->send(400, "text/plain", "Bad Request");
     }
 
-    charger_setpoint_HV_IDC = value.toFloat();
+    datalayer.charger.charger_setpoint_HV_IDC = value.toFloat();
 
     request->send(200, "text/plain", "Updated successfully");
   });
@@ -494,7 +590,7 @@ void init_webserver() {
       return request->requestAuthentication();
     if (request->hasParam("value")) {
       String value = request->getParam("value")->value();
-      charger_setpoint_HV_IDC_END = value.toFloat();
+      datalayer.charger.charger_setpoint_HV_IDC_END = value.toFloat();
       request->send(200, "text/plain", "Updated successfully");
     } else {
       request->send(400, "text/plain", "Bad Request");
@@ -507,7 +603,7 @@ void init_webserver() {
       return request->requestAuthentication();
     if (request->hasParam("value")) {
       String value = request->getParam("value")->value();
-      charger_HV_enabled = (bool)value.toInt();
+      datalayer.charger.charger_HV_enabled = (bool)value.toInt();
       request->send(200, "text/plain", "Updated successfully");
     } else {
       request->send(400, "text/plain", "Bad Request");
@@ -520,7 +616,7 @@ void init_webserver() {
       return request->requestAuthentication();
     if (request->hasParam("value")) {
       String value = request->getParam("value")->value();
-      charger_aux12V_enabled = (bool)value.toInt();
+      datalayer.charger.charger_aux12V_enabled = (bool)value.toInt();
       request->send(200, "text/plain", "Updated successfully");
     } else {
       request->send(400, "text/plain", "Bad Request");
@@ -736,7 +832,6 @@ String processor(const String& var) {
         content += "#F5CC00;";
         break;
       case led_color::BLUE:
-      case led_color::RGB:
         content += "#2B35AF;";  // Blue in test mode
         break;
       case led_color::RED:
@@ -826,6 +921,28 @@ String processor(const String& var) {
         break;
     }
     content += "</h4>";
+
+#ifdef MEB_BATTERY
+    content += "<h4>Battery BMS status: ";
+    switch (datalayer.battery.status.real_bms_status) {
+      case BMS_ACTIVE:
+        content += String("OK");
+        break;
+      case BMS_FAULT:
+        content += String("FAULT");
+        break;
+      case BMS_DISCONNECTED:
+        content += String("DISCONNECTED");
+        break;
+      case BMS_STANDBY:
+        content += String("STANDBY");
+        break;
+      default:
+        content += String("??");
+        break;
+    }
+    content += "</h4>";
+#endif
 
     if (datalayer.battery.status.current_dA == 0) {
       content += "<h4>Battery idle</h4>";
@@ -1042,7 +1159,7 @@ String processor(const String& var) {
     content += "<div style='background-color: #FF6E00; padding: 10px; margin-bottom: 10px;border-radius: 50px'>";
 
     content += "<h4>Charger HV Enabled: ";
-    if (charger_HV_enabled) {
+    if (datalayer.charger.charger_HV_enabled) {
       content += "<span>&#10003;</span>";
     } else {
       content += "<span style='color: red;'>&#10005;</span>";
@@ -1050,22 +1167,22 @@ String processor(const String& var) {
     content += "</h4>";
 
     content += "<h4>Charger Aux12v Enabled: ";
-    if (charger_aux12V_enabled) {
+    if (datalayer.charger.charger_aux12V_enabled) {
       content += "<span>&#10003;</span>";
     } else {
       content += "<span style='color: red;'>&#10005;</span>";
     }
     content += "</h4>";
 #ifdef CHEVYVOLT_CHARGER
-    float chgPwrDC = static_cast<float>(charger_stat_HVcur * charger_stat_HVvol);
-    float chgPwrAC = static_cast<float>(charger_stat_ACcur * charger_stat_ACvol);
+    float chgPwrDC = static_cast<float>(datalayer.charger.charger_stat_HVcur * datalayer.charger.charger_stat_HVvol);
+    float chgPwrAC = static_cast<float>(datalayer.charger.charger_stat_ACcur * datalayer.charger.charger_stat_ACvol);
     float chgEff = chgPwrDC / chgPwrAC * 100;
-    float ACcur = charger_stat_ACcur;
-    float ACvol = charger_stat_ACvol;
-    float HVvol = charger_stat_HVvol;
-    float HVcur = charger_stat_HVcur;
-    float LVvol = charger_stat_LVvol;
-    float LVcur = charger_stat_LVcur;
+    float ACcur = datalayer.charger.charger_stat_ACcur;
+    float ACvol = datalayer.charger.charger_stat_ACvol;
+    float HVvol = datalayer.charger.charger_stat_HVvol;
+    float HVcur = datalayer.charger.charger_stat_HVcur;
+    float LVvol = datalayer.charger.charger_stat_LVvol;
+    float LVcur = datalayer.charger.charger_stat_LVcur;
 
     content += formatPowerValue("Charger Output Power", chgPwrDC, "", 1);
     content += "<h4 style='color: white;'>Charger Efficiency: " + String(chgEff) + "%</h4>";
@@ -1077,12 +1194,12 @@ String processor(const String& var) {
     content += "<h4 style='color: white;'>Charger AC Input I: " + String(ACcur, 2) + " A</h4>";
 #endif  // CHEVYVOLT_CHARGER
 #ifdef NISSANLEAF_CHARGER
-    float chgPwrDC = static_cast<float>(charger_stat_HVcur * 100);
-    charger_stat_HVcur = chgPwrDC / (datalayer.battery.status.voltage_dV / 10);  // P/U=I
-    charger_stat_HVvol = static_cast<float>(datalayer.battery.status.voltage_dV / 10);
-    float ACvol = charger_stat_ACvol;
-    float HVvol = charger_stat_HVvol;
-    float HVcur = charger_stat_HVcur;
+    float chgPwrDC = static_cast<float>(datalayer.charger.charger_stat_HVcur * 100);
+    datalayer.charger.charger_stat_HVcur = chgPwrDC / (datalayer.battery.status.voltage_dV / 10);  // P/U=I
+    datalayer.charger.charger_stat_HVvol = static_cast<float>(datalayer.battery.status.voltage_dV / 10);
+    float ACvol = datalayer.charger.charger_stat_ACvol;
+    float HVvol = datalayer.charger.charger_stat_HVvol;
+    float HVcur = datalayer.charger.charger_stat_HVcur;
 
     content += formatPowerValue("Charger Output Power", chgPwrDC, "", 1);
     content += "<h4 style='color: white;'>Charger HVDC Output V: " + String(HVvol, 2) + " V</h4>";

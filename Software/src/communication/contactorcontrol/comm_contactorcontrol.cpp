@@ -43,7 +43,6 @@ unsigned long currentTime = 0;
 unsigned long lastPowerRemovalTime = 0;
 const unsigned long powerRemovalInterval = 24 * 60 * 60 * 1000;  // 24 hours in milliseconds
 const unsigned long powerRemovalDuration = 30000;                // 30 seconds in milliseconds
-bool isBMSResetActive = false;
 
 void set(uint8_t pin, bool direction, uint32_t pwm_freq = 0xFFFF) {
 #ifdef PWM_CONTACTOR_CONTROL
@@ -94,15 +93,24 @@ void init_contactors() {
   pinMode(BMS_2_POWER, OUTPUT);
   digitalWrite(BMS_2_POWER, HIGH);
 #endif BMS_2_POWER
-#endif                     // HW with dedicated BMS pins
-#ifdef PERIODIC_BMS_RESET  // User has enabled BMS reset, turn on output on start
+#endif                                                        // HW with dedicated BMS pins
+#if defined(PERIODIC_BMS_RESET) || defined(REMOTE_BMS_RESET)  // User has enabled BMS reset, turn on output on start
   pinMode(BMS_POWER, OUTPUT);
   digitalWrite(BMS_POWER, HIGH);
 #ifdef BMS_2_POWER  //Hardware supports 2x BMS
   pinMode(BMS_2_POWER, OUTPUT);
   digitalWrite(BMS_2_POWER, HIGH);
-#endif BMS_2_POWER
+#endif  //BMS_2_POWER
 #endif  //PERIODIC_BMS_RESET
+}
+
+static void dbg_contactors(const char* state) {
+#ifdef DEBUG_LOG
+  logging.print("[");
+  logging.print(millis());
+  logging.print(" ms] contactors control: ");
+  logging.println(state);
+#endif
 }
 
 // Main functions of the handle_contactors include checking if inverter allows for closing, checking battery 2, checking BMS power output, and actual contactor closing/precharge via GPIO
@@ -144,6 +152,7 @@ void handle_contactors() {
     set(PRECHARGE_PIN, OFF);
     set(NEGATIVE_CONTACTOR_PIN, OFF, PWM_OFF_DUTY);
     set(POSITIVE_CONTACTOR_PIN, OFF, PWM_OFF_DUTY);
+    datalayer.system.status.contactors_engaged = false;
 
     if (datalayer.system.status.battery_allows_contactor_closing &&
         datalayer.system.status.inverter_allows_contactor_closing && !datalayer.system.settings.equipment_stop_active) {
@@ -173,6 +182,7 @@ void handle_contactors() {
   switch (contactorStatus) {
     case START_PRECHARGE:
       set(NEGATIVE_CONTACTOR_PIN, ON, PWM_ON_DUTY);
+      dbg_contactors("NEGATIVE");
       prechargeStartTime = currentTime;
       contactorStatus = PRECHARGE;
       break;
@@ -180,6 +190,7 @@ void handle_contactors() {
     case PRECHARGE:
       if (currentTime - prechargeStartTime >= NEGATIVE_CONTACTOR_TIME_MS) {
         set(PRECHARGE_PIN, ON);
+        dbg_contactors("PRECHARGE");
         negativeStartTime = currentTime;
         contactorStatus = POSITIVE;
       }
@@ -188,6 +199,7 @@ void handle_contactors() {
     case POSITIVE:
       if (currentTime - negativeStartTime >= PRECHARGE_TIME_MS) {
         set(POSITIVE_CONTACTOR_PIN, ON, PWM_ON_DUTY);
+        dbg_contactors("POSITIVE");
         prechargeCompletedTime = currentTime;
         contactorStatus = PRECHARGE_OFF;
       }
@@ -198,6 +210,7 @@ void handle_contactors() {
         set(PRECHARGE_PIN, OFF);
         set(NEGATIVE_CONTACTOR_PIN, ON, PWM_HOLD_DUTY);
         set(POSITIVE_CONTACTOR_PIN, ON, PWM_HOLD_DUTY);
+        dbg_contactors("PRECHARGE_OFF");
         contactorStatus = COMPLETED;
         datalayer.system.status.contactors_engaged = true;
       }
@@ -222,44 +235,58 @@ void handle_contactors_battery2() {
 }
 #endif  // CONTACTOR_CONTROL_DOUBLE_BATTERY
 
-/* Once every 24 hours we remove power from the BMS_power pin for 30 seconds. This makes the BMS recalculate all SOC% and avoid memory leaks
+/* PERIODIC_BMS_RESET - Once every 24 hours we remove power from the BMS_power pin for 30 seconds.
+REMOTE_BMS_RESET - Allows the user to remotely powercycle the BMS by sending a command to the emulator via MQTT.
+
+This makes the BMS recalculate all SOC% and avoid memory leaks
 During that time we also set the emulator state to paused in order to not try and send CAN messages towards the battery
 Feature is only used if user has enabled PERIODIC_BMS_RESET in the USER_SETTINGS */
 
 void handle_BMSpower() {
-#ifdef PERIODIC_BMS_RESET
+#if defined(PERIODIC_BMS_RESET) || defined(REMOTE_BMS_RESET)
   // Get current time
   currentTime = millis();
 
+#ifdef PERIODIC_BMS_RESET
   // Check if 24 hours have passed since the last power removal
-  if (currentTime - lastPowerRemovalTime >= powerRemovalInterval && !isBMSResetActive) {
-    lastPowerRemovalTime = currentTime;  // Record the time when BMS reset was started
-
-    // Set emulator state to paused (Max Charge/Discharge = 0 & CAN = stop)
-    // TODO: We try to keep contactors engaged during this pause, and just ramp power down to 0.
-    // If this turns out to not work properly, set also the third option to true to open contactors
-    setBatteryPause(true, true, false, false);
-
-    digitalWrite(BMS_POWER, LOW);  // Remove power by setting the BMS power pin to LOW
-#ifdef BMS_2_POWER
-    digitalWrite(BMS_2_POWER, LOW);  // Same for battery 2
-#endif
-
-    isBMSResetActive = true;  // Set a flag to indicate power removal is active
+  if (currentTime - lastPowerRemovalTime >= powerRemovalInterval) {
+    start_bms_reset();
   }
+#endif  //PERIODIC_BMS_RESET
 
   // If power has been removed for 30 seconds, restore the power and resume the emulator
-  if (isBMSResetActive && currentTime - lastPowerRemovalTime >= powerRemovalDuration) {
+  if (datalayer.system.status.BMS_reset_in_progress && currentTime - lastPowerRemovalTime >= powerRemovalDuration) {
     // Reapply power to the BMS
     digitalWrite(BMS_POWER, HIGH);
 #ifdef BMS_2_POWER
     digitalWrite(BMS_2_POWER, HIGH);  // Same for battery 2
 #endif
 
-    //Resume the battery pause and CAN communication
+    //Resume from the power pause
     setBatteryPause(false, false, false, false);
 
-    isBMSResetActive = false;  // Reset the power removal flag
+    datalayer.system.status.BMS_reset_in_progress = false;  // Reset the power removal flag
   }
-#endif  //PERIODIC_BMS_RESET
+#endif  //defined(PERIODIC_BMS_RESET) || defined(REMOTE_BMS_RESET)
+}
+
+void start_bms_reset() {
+#if defined(PERIODIC_BMS_RESET) || defined(REMOTE_BMS_RESET)
+  if (!datalayer.system.status.BMS_reset_in_progress) {
+    lastPowerRemovalTime = currentTime;  // Record the time when BMS reset was started
+
+    // Set a flag to let the rest of the system know we are cutting power to the BMS.
+    // The battery CAN sending routine will then know not to try to send anything towards battery while active
+    datalayer.system.status.BMS_reset_in_progress = true;
+
+    // Set emulator state to paused (Max Charge/Discharge = 0 & CAN = stop)
+    // We try to keep contactors engaged during this pause, and just ramp power down to 0.
+    setBatteryPause(true, false, false, false);
+
+    digitalWrite(BMS_POWER, LOW);  // Remove power by setting the BMS power pin to LOW
+#ifdef BMS_2_POWER
+    digitalWrite(BMS_2_POWER, LOW);  // Same for battery 2
+#endif
+  }
+#endif  //defined(PERIODIC_BMS_RESET) || defined(REMOTE_BMS_RESET)
 }
